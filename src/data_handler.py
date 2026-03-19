@@ -18,8 +18,13 @@ class DataHandler:
         df = yf.download("^VIX", period="5d", interval="1d", progress=False, auto_adjust=True)
         if df.empty:
             return 20.0
-        close_col = "Close" if "Close" in df.columns else df.columns[3]
-        return float(df[close_col].dropna().iloc[-1])
+        # Handle both MultiIndex columns (newer yfinance) and flat columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df.columns = [c.lower() for c in df.columns]
+        val = df["close"].dropna().iloc[-1]
+        return float(val) if np.isscalar(val) else float(val.iloc[0])
 
     def fetch_live_quote(self, ticker: str) -> dict:
         """Fetch near-real-time quote using yf.Ticker (not delayed download)."""
