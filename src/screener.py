@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from data_handler import DataHandler
 from indicators import FeatureEngineer
 from predictor import SwingPredictor
+from sentiment import NewsSentimentAnalyzer
 
 
 # ── Known market events (FOMC 2026 dates, update as needed) ─────
@@ -81,6 +82,7 @@ class CreditSpreadScreener:
     def __init__(self):
         self.handler = DataHandler()
         self.engineer = FeatureEngineer()
+        self.sentiment = NewsSentimentAnalyzer()
 
     def _fetch_vix(self) -> float:
         return self.handler.fetch_vix()
@@ -255,6 +257,28 @@ class CreditSpreadScreener:
             threshold=f"Up + >{self.ML_CONVICTION_MIN:.0%}",
             weight=1.5,
         ))
+
+        # 11. News sentiment
+        try:
+            sent = self.sentiment.analyze(ticker)
+            sent_ok = sent.composite_score > -0.15  # not strongly bearish
+            sent_label = f"{sent.label} ({sent.composite_score:+.3f})"
+            fear_note = f" Fear:{sent.fear_level:.0%}" if sent.fear_level > 0.3 else ""
+            checks.append(Check(
+                name="News Sentiment",
+                passed=sent_ok,
+                value=f"{sent_label}{fear_note}",
+                threshold="Not strongly bearish",
+                weight=1.5,
+            ))
+        except Exception:
+            checks.append(Check(
+                name="News Sentiment",
+                passed=True,
+                value="Unavailable (skip)",
+                threshold="N/A",
+                weight=0.0,
+            ))
 
         return ScreenResult(ticker=ticker, checks=checks, timestamp=now)
 

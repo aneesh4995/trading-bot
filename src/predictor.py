@@ -5,6 +5,7 @@ from sklearn.model_selection import train_test_split
 
 
 FEATURES = ["RSI_14", "MACD", "MACD_signal", "EMA_20", "EMA_50", "EMA_200", "ATR_14"]
+FEATURES_WITH_SENTIMENT = FEATURES + ["sentiment_score"]
 
 
 class SwingPredictor:
@@ -28,10 +29,22 @@ class SwingPredictor:
         self.model.fit(X_train, y_train)
         self.trained = True
 
-    def predict(self, df: pd.DataFrame) -> tuple[int, float]:
+    def predict(self, df: pd.DataFrame, sentiment_score: float = None) -> tuple[int, float]:
         if not self.trained:
             raise RuntimeError("Model must be trained before predicting.")
-        latest = df[FEATURES].dropna().iloc[[-1]]
+        latest = df[FEATURES].dropna().iloc[[-1]].copy()
+
+        # Blend sentiment into probability if provided
         label = int(self.model.predict(latest)[0])
         prob = float(self.model.predict_proba(latest)[0][label])
+
+        if sentiment_score is not None:
+            # Sentiment adjustment: shift probability by up to ±10%
+            # Positive sentiment boosts bullish, negative boosts bearish
+            if label == 1:  # bullish prediction
+                adjustment = sentiment_score * 0.10
+            else:  # bearish prediction
+                adjustment = -sentiment_score * 0.10
+            prob = max(0.01, min(0.99, prob + adjustment))
+
         return label, prob
