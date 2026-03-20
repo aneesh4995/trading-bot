@@ -238,7 +238,28 @@ def build_briefing() -> tuple[str, str, str]:
     lines.append("--- RECOMMENDATION ---")
     if best_verdict == "GO":
         lines.append("OPEN credit spread today!")
-        lines.append("Sell 50d put, buy 10pts lower, 14 DTE, TP 50%")
+        for ticker in ["SPY", "QQQ"]:
+            if screen_results[ticker].verdict == "GO":
+                try:
+                    price = DataHandler().fetch_live_quote(ticker).get("last", 0)
+                except Exception:
+                    price = 0
+                if price > 0:
+                    sell_strike = round(price)
+                    buy_strike = sell_strike - 10
+                    exp_date = (today + datetime.timedelta(days=14)).strftime("%m/%d")
+                    lines.append("")
+                    lines.append("{} Bull Put Spread:".format(ticker))
+                    lines.append("  1. Open broker (IBKR/Schwab/TOS)")
+                    lines.append("  2. SELL ${} put (ATM, ~50 delta)".format(sell_strike))
+                    lines.append("  3. BUY ${} put (10pts lower)".format(buy_strike))
+                    lines.append("  4. Expiry: ~{} (14 DTE)".format(exp_date))
+                    lines.append("  5. Limit order: mid price of spread")
+                    lines.append("  6. Set alert at 50% profit to close")
+                    lines.append("  Max risk: ${}  per contract".format((sell_strike - buy_strike) * 100))
+                else:
+                    lines.append("")
+                    lines.append("{}: Sell ATM put, buy 10pts lower, 14 DTE, TP 50%".format(ticker))
     elif best_verdict == "CAUTION":
         lines.append("WAIT for blockers to clear.")
         for ticker in ["SPY", "QQQ"]:
@@ -247,6 +268,23 @@ def build_briefing() -> tuple[str, str, str]:
                 lines.append("  {} likely GO: ~{}".format(ticker, w["estimate"]))
     else:
         lines.append("WAIT. Conditions unfavorable.")
+
+    # Earnings trade instructions
+    trade_today_earnings = [e for e in earnings if e.get("trade_day")]
+    if trade_today_earnings:
+        lines.append("")
+        lines.append("--- EARNINGS TRADE STEPS ---")
+        for e in trade_today_earnings:
+            lines.append("")
+            lines.append("{} Earnings Short Put:".format(e["ticker"]))
+            lines.append("  1. Wait until 3:30 PM CT today")
+            lines.append("  2. SELL ${:.0f} put (~20 delta, below expected move)".format(e["put_strike"]))
+            if e["put_premium"] > 0:
+                lines.append("  3. Limit price: ${:.2f} (${:.0f}/contract)".format(
+                    e["put_premium"], e["put_premium"] * 100))
+            lines.append("  4. Expiry: nearest (2 DTE)")
+            lines.append("  5. EXIT: Buy back in first 30 min tomorrow morning")
+            lines.append("  6. Profit from IV crush overnight (~80-100% of credit)")
 
     # Title
     spy_verdict = screen_results["SPY"].verdict
