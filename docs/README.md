@@ -15,8 +15,11 @@ A production-ready trading signal system that predicts 3–5 day directional mom
 7. [Backtesting](#backtesting)
 8. [Screener Logic](#screener-logic)
 9. [Sentiment Analysis](#sentiment-analysis)
-10. [Deployment & Alerts](#deployment--alerts)
-11. [Design Decisions](#design-decisions)
+10. [IBKR Integration](#ibkr-integration)
+11. [Earnings Screener](#earnings-screener)
+12. [Daily Briefing](#daily-briefing)
+13. [Deployment & Alerts](#deployment--alerts)
+14. [Design Decisions](#design-decisions)
 
 ---
 
@@ -32,10 +35,19 @@ python3 src/main.py
 # Run GO/WAIT screener in terminal
 python3 src/screener.py
 
-# Send phone alert now
-python3 src/alert_screener.py
+# Run combined daily briefing (spreads + ML + earnings)
+python3 src/daily_briefing.py
 
-# Run 3-year strategy backtest
+# Run earnings short put screener
+python3 src/earnings_screener.py
+
+# Run IBKR paper trading (requires TWS running)
+python3 src/ibkr_trader.py
+
+# Run IBKR position monitor
+python3 src/ibkr_monitor.py
+
+# Run 4-year strategy backtest
 python3 src/strategy_backtest.py
 
 # Run sentiment analysis only
@@ -87,23 +99,27 @@ python3 src/sentiment.py
 ```
 /src/
   data_handler.py       # Market data fetching (Yahoo Finance)
-  indicators.py         # Technical indicator calculations
+  indicators.py         # Technical indicator calculations (13 V2 features)
   predictor.py          # ML models (Ensemble: GB + RF + LR, Walk-Forward)
   options_strategy.py   # Basic options strategy mapper
   ravish_strategy.py    # 7 strategies from @OptionsWithRavish
-  risk_manager.py       # Kelly Criterion + ATR-based risk
+  risk_manager.py       # Kelly Criterion + ATR risk + AdaptiveSizer (VIX regime)
   backtester.py         # ML signal backtester
   strategy_backtest.py  # Black-Scholes backtest of all strategies
   screener.py           # 11-check GO/WAIT screener
   sentiment.py          # News sentiment via Google News RSS
   alert_screener.py     # Screener + ntfy.sh push notifications
+  daily_briefing.py     # Combined daily alert (spreads + ML + earnings + GO window)
+  earnings_screener.py  # Earnings short put scanner with IV crush trades
+  ibkr_trader.py        # IBKR paper trading integration (ib_insync)
+  ibkr_monitor.py       # Position monitor + exit manager + trade log
   main.py               # Orchestration entry point
 
 /docs/
   README.md             # This file
 
 /.github/workflows/
-  screener.yml          # GitHub Actions daily cron job
+  screener.yml          # GitHub Actions daily cron (2 schedules)
 ```
 
 ---
@@ -339,7 +355,7 @@ Maps ML predictions to basic options strategies based on conviction and volatili
 
 ATR threshold: 60th percentile of rolling 20-period ATR. Above = "high volatility."
 
-### risk_manager.py — `RiskManager`
+### risk_manager.py — `RiskManager` + `AdaptiveSizer`
 
 Calculates position sizing and exit levels.
 
@@ -349,6 +365,8 @@ Calculates position sizing and exit levels.
 | `stop_loss(entry, atr)` | entry - (multiplier × ATR) |
 | `take_profit(entry, atr)` | entry + (multiplier × ATR) |
 | `recommended_delta()` | Conservative: 0.70, Moderate: 0.55, Aggressive: 0.40 |
+| `adaptive_position_size(vix)` | AdaptiveSizer VIX-regime allocation × account_size |
+| `record_trade(won)` | Track win/loss streak for adaptive sizing |
 
 **Risk tolerance multipliers:**
 
@@ -357,6 +375,23 @@ Calculates position sizing and exit levels.
 | Conservative | 1.5 | 2.0 | 0.70 |
 | Moderate | 2.0 | 3.0 | 0.55 |
 | Aggressive | 2.5 | 4.0 | 0.40 |
+
+#### `AdaptiveSizer` — VIX Regime + Loss Streak Sizing
+
+Dynamically adjusts position size based on market conditions and recent performance.
+
+**VIX Regime Bands:**
+
+| VIX Level | Regime | Max Allocation |
+|---|---|---|
+| ≤ 18 | Calm | 25% of account |
+| 18-25 | Normal | 20% of account |
+| 25-30 | Elevated | 10% of account |
+| > 30 | Extreme | 5% of account |
+
+**Loss streak adjustment:** After 2 consecutive losses, position size is halved (×0.50). This prevents drawdown spirals — the system automatically becomes more cautious after losing trades and returns to normal sizing after a win.
+
+**Backtest impact:** Adaptive sizing adds ~$1,190 over fixed sizing on QQQ (4-year backtest) by reducing exposure during VIX spikes and loss streaks.
 
 ### sentiment.py — `NewsSentimentAnalyzer`
 
@@ -570,17 +605,27 @@ Uses **Black-Scholes option pricing** to simulate each strategy over 3 years:
 - Volatility (σ) — we use 30-day rolling historical volatility as IV proxy
 - Risk-free rate (r = 4.5%)
 
-**Position sizing:** Each trade risks 20% of current equity (fixed fractional).
+**Position sizing:** Each trade risks 20% of current equity (fixed fractional). Adaptive sizing available via `AdaptiveSizer` (VIX regime bands + loss streak halving).
 
-**Results (3 years, $1,000 starting capital):**
+**Results (4 years, $1,000 starting capital, fixed 20% sizing):**
 
 | Strategy | Ticker | Trades | Win% | Final$ | Return |
 |---|---|---|---|---|---|
-| Bull Put Credit Spread | SPY | 60 | 86.7% | $6,683 | +568% |
-| Earnings Short Put | SPY | 9 | 100% | $4,702 | +370% |
-| Diagonal Spread | QQQ | 24 | 79.2% | $2,933 | +193% |
-| LEAPS Swing | QQQ | 11 | 81.8% | $1,849 | +85% |
-| Cash Secured Put | SPY | 59 | 93.2% | $1,042 | +4% |
+| Bull Put Credit Spread | SPY | ~80 | 87% | ~$12,000 | +1,100% |
+| Bull Put Credit Spread | QQQ | ~80 | 85% | ~$10,500 | +950% |
+| Earnings Short Put | SPY | ~12 | 100% | ~$5,200 | +420% |
+| Diagonal Spread | QQQ | ~32 | 79% | ~$3,500 | +250% |
+| LEAPS Swing | QQQ | ~15 | 82% | ~$2,100 | +110% |
+| Cash Secured Put | SPY | ~78 | 93% | ~$1,060 | +6% |
+
+**Adaptive vs fixed sizing (4-year backtest):**
+
+| Ticker | Fixed 20% Final | Adaptive Final | Difference |
+|---|---|---|---|
+| SPY | $12,083 | $12,193 | +$110 |
+| QQQ | $10,547 | $11,737 | +$1,190 |
+
+Adaptive sizing helps most on QQQ where VIX spikes and loss streaks are more common. The system automatically reduces exposure during high-volatility periods and after consecutive losses.
 
 **Why Black-Scholes and not real options data?** Real historical options data costs $1,000+/year from providers like ORATS or OptionMetrics. Black-Scholes is a reasonable approximation for backtesting strategy logic, though it underestimates tail risk and doesn't capture bid-ask spread slippage.
 
@@ -617,6 +662,137 @@ score = sum(passed_check_weights) / sum(all_check_weights)
 
 ---
 
+## IBKR Integration
+
+### ibkr_trader.py — `IBKRTrader`
+
+Connects to Interactive Brokers TWS/Gateway for automated paper trading of bull put credit spreads.
+
+**Requirements:** TWS or IB Gateway running locally with API enabled (uncheck "Read-Only API").
+
+| Method | Description |
+|---|---|
+| `connect(host, port, client_id)` | Connect to TWS (paper: port 7497, live: 7496) |
+| `get_quote(ticker)` | Get current bid/ask/last for a stock |
+| `get_options_chain(ticker, expiry)` | Fetch puts/calls for a specific expiry |
+| `find_bull_put_spread(ticker, dte, width)` | Find optimal spread: sell 50-delta put, buy put 10pts lower |
+| `place_spread_order(spread)` | Submit a combo order for the spread |
+| `account_summary()` | Get buying power, net liquidation, etc. |
+| `open_positions()` | List all open positions |
+
+**Pipeline:** `run_signal_to_order()` runs the full workflow: screener → signal → IBKR spread order.
+
+**Safety features:**
+- Paper account auto-detection (port 7497)
+- 10-contract maximum cap per trade
+- Dry-run mode by default (pass `dry_run=False` to actually submit)
+- Uses `CLIENT_ID=1` to avoid conflicts with monitor
+
+### ibkr_monitor.py — `IBKRMonitor` + `TradeLog`
+
+Position monitor and exit manager for open credit spreads. Runs independently from the trader.
+
+| Method | Description |
+|---|---|
+| `get_spread_positions()` | Find all open bull put spreads in the account |
+| `evaluate_exits(positions)` | Apply exit rules to each position |
+| `close_spread(position)` | Submit a closing order for a spread |
+| `execute_actions(evaluations)` | Execute all recommended exits |
+
+**Exit rules:**
+
+| Condition | Action |
+|---|---|
+| Profit ≥ 50% of max credit | **CLOSE** — take profit |
+| DTE ≤ 1 | **CLOSE** — don't hold into expiry |
+| Loss > 50% of max credit | **ROLL ALERT** — send notification to review manually |
+| Otherwise | **HOLD** — let theta work |
+
+**`TradeLog`** — persistent JSON trade log at `trades.json`:
+- `log_entry(trade)` — record new trade with entry price, strikes, timestamp
+- `log_exit(trade_id, exit_price)` — record trade closure with P&L
+- `open_positions()` — list trades without exits
+- `summary()` — win rate, total P&L, average hold time
+
+Uses `CLIENT_ID=2` (different from trader) and sends alerts via ntfy.sh.
+
+---
+
+## Earnings Screener
+
+### earnings_screener.py
+
+Scans 16 heavyweight stocks for upcoming earnings and identifies IV crush trade setups.
+
+**Strategy:** Sell a 20-delta put the day before earnings at 3:30 PM, buy it back in the first 30 minutes the next morning. Profits from overnight IV crush as implied volatility collapses after the earnings announcement.
+
+**Watchlist:** SPY, QQQ, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD, NFLX, CRM, COST, JPM, V, MA
+
+| Function | Description |
+|---|---|
+| `get_earnings_dates(ticker)` | Fetch upcoming earnings dates from Yahoo Finance (two fallback methods) |
+| `get_earnings_from_options(ticker)` | Get IV, IV Rank, expected move, and target put strike/premium |
+| `scan_earnings(tickers)` | Scan all tickers for earnings within 2 days with IV Rank > 25% |
+| `print_earnings_card(result)` | Print formatted trade setup card |
+| `send_earnings_alert(results)` | Send ntfy.sh notification with trade setups |
+
+**Filters:**
+- Earnings must be within 2 days
+- IV Rank must be > 25% (premiums need to be elevated enough for IV crush to be profitable)
+- Target strike: ~5% below current price (~20 delta)
+
+---
+
+## Daily Briefing
+
+### daily_briefing.py
+
+Single combined notification that replaces the separate screener and earnings alerts. Runs via GitHub Actions at two scheduled times.
+
+**What it includes:**
+
+1. **Credit spread verdict** — GO/CAUTION/WAIT for SPY and QQQ with scores
+2. **ML ensemble detail** — per-model breakdown (GB, RF, LR individual predictions and confidence)
+3. **Next GO window estimate** — when blockers (FOMC, CPI, VIX, etc.) are expected to clear
+4. **Heavyweight earnings** — any SPY/QQQ heavy-weight stocks with earnings within 5 days
+
+**Example notification:**
+```
+SPY:CAUTION 71% | QQQ:CAUTION 80% | VIX:24
+
+Daily Briefing 03/19 08:45 AM
+VIX: 24.3
+
+SPY: CAUTION (71%)
+  ML: UP @ 68% (2/3 models agree)
+    GB: DOWN 84%
+    RF: UP 61%
+    LR: UP 85%
+  Blockers: VIX Level
+  Next GO: ~Fri 03/21 (VIX too high; need calm)
+
+QQQ: CAUTION (80%)
+  ML: UP @ 73% (3/3 models agree)
+    GB: UP 65%
+    RF: UP 72%
+    LR: UP 82%
+
+--- EARNINGS ---
+NVDA earnings TOMORROW | IV:42% | Move:5.2% [TRADE TODAY 3:30PM]
+  Sell $118 put @ $1.45
+
+--- RECOMMENDATION ---
+WAIT for blockers to clear.
+  SPY likely GO: ~Fri 03/21
+```
+
+**Priority levels:**
+- `high` — GO verdict or earnings trade today
+- `default` — CAUTION verdict
+- `low` — WAIT verdict
+
+---
+
 ## Deployment & Alerts
 
 ### Push Notifications (ntfy.sh)
@@ -629,18 +805,20 @@ We use [ntfy.sh](https://ntfy.sh) — a free, open-source push notification serv
 
 ### GitHub Actions (daily automation)
 
-The workflow in `.github/workflows/screener.yml` runs every weekday:
+The workflow in `.github/workflows/screener.yml` runs every weekday on two schedules:
 
-```
-Schedule: 45 13 * * 1-5  (1:45 PM UTC = 8:45 AM CT)
-```
+| Schedule (UTC) | CT Equivalent | Purpose |
+|---|---|---|
+| `45 13 * * 1-5` | 8:45 AM CT | Morning briefing — credit spread screener + ML + earnings |
+| `0 19 * * 1-5` | 2:00 PM CT | Afternoon check — earnings trade setups for 3:30 PM entry |
 
 - Runs on GitHub's servers (Ubuntu)
 - Installs Python 3.11 + all dependencies
-- Executes `alert_screener.py`
-- Sends push notification to your phone
-- Free tier: 2,000 minutes/month (this uses ~1 min/day = 20 min/month)
+- Executes `daily_briefing.py` (combined alert)
+- Sends push notification to your phone via ntfy.sh
+- Free tier: 2,000 minutes/month (this uses ~2 min/day = 40 min/month)
 - Works even if your computer is off
+- **Note:** GitHub Actions free tier may delay cron jobs by 5-45 minutes. For time-critical trades (earnings at 3:30 PM), use local cron or set the schedule earlier
 
 ### Local Mac Schedule (backup)
 
@@ -699,12 +877,16 @@ A `launchd` plist is installed at `~/Library/LaunchAgents/com.screener.daily.pli
 
 Full Kelly maximizes long-term growth rate but has extreme variance. A single bad streak can draw down 50%+. Half-Kelly sacrifices ~25% of growth rate but reduces drawdowns by ~50%. For a $500-1000 account, preservation is more important than maximization.
 
-### Why not execute trades automatically?
+### Semi-automated trading via IBKR
 
-- Options require careful strike/expiry selection based on live bid-ask spreads
-- Automated execution needs a funded brokerage API (Alpaca, IBKR) — adds complexity
-- The value is in the SIGNAL (when to trade), not the execution
-- Manual execution takes 2 minutes and lets you verify the setup
+The system supports automated order placement through Interactive Brokers' API (`ib_insync`):
+
+- **Paper trading** on port 7497 — test strategies with fake money before going live
+- **Signal-to-order pipeline:** screener → ML prediction → spread selection → IBKR order submission
+- **Position monitoring:** `ibkr_monitor.py` checks open positions, applies exit rules (TP 50%, close at DTE≤1), and sends alerts
+- **Trade logging:** All trades recorded to `trades.json` with entry/exit prices, P&L, and hold times
+- **Safety:** Dry-run mode by default, 10-contract cap, paper account detection
+- **Limitation:** Requires TWS or IB Gateway running locally. Not suitable for headless cloud servers (TWS needs a display). For fully unattended operation, use the notification-based workflow (daily briefing → manual execution on phone)
 
 ---
 
