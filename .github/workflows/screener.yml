@@ -2,8 +2,10 @@ name: Daily Options Screener
 
 on:
   schedule:
-    # 8:45 AM CT = 1:45 PM UTC (Mon-Fri)
+    # 8:45 AM CT = 1:45 PM UTC (Mon-Fri) — credit spread screener
     - cron: '45 13 * * 1-5'
+    # 2:00 PM CT = 7:00 PM UTC (Mon-Fri) — earnings check
+    - cron: '0 19 * * 1-5'
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
 jobs:
@@ -20,8 +22,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run screener and send alerts
+      - name: Run daily briefing (spreads + ML + earnings)
         working-directory: src
-        run: python alert_screener.py
+        run: python daily_briefing.py
         env:
           NTFY_TOPIC: spy-qqq-screener-aneesh

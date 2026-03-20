@@ -1,6 +1,6 @@
 from data_handler import DataHandler
 from indicators import FeatureEngineer
-from predictor import SwingPredictor
+from predictor import SwingPredictor, EnsemblePredictor, WalkForwardPredictor
 from options_strategy import OptionsSignalMapper
 from risk_manager import RiskManager
 from backtester import BacktestEngine
@@ -60,6 +60,8 @@ def main():
 
         df_raw = handler.fetch_ohlcv(ticker, period="2y", interval="1d")
         df = engineer.add_all(df_raw)
+        df = engineer.add_vix(df)
+        df = engineer.add_put_call_ratio(df)
 
         # --- Backtest first to derive realistic Kelly inputs ---
         bt_result = None
@@ -77,10 +79,14 @@ def main():
 
         risk = RiskManager(account_size=ACCOUNT_SIZE, risk_tolerance=RISK_TOLERANCE)
 
-        # --- Live signal ---
-        predictor = SwingPredictor()
-        predictor.train(df)
+        # --- Live signal (Ensemble with walk-forward) ---
+        predictor = WalkForwardPredictor(retrain_every=63)
+        predictor.train_latest(df)
         label, prob = predictor.predict(df)
+
+        # Per-model detail
+        detail = predictor.predict_detail(df)
+        print(f"  Ensemble detail: {detail}")
 
         atr_series = df["ATR_14"]
         strategy = mapper.get_strategy(label, prob, atr_series)

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from data_handler import DataHandler
 from indicators import FeatureEngineer
-from predictor import SwingPredictor
+from predictor import EnsemblePredictor
 from sentiment import NewsSentimentAnalyzer
 
 
@@ -131,8 +131,10 @@ class CreditSpreadScreener:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         checks = []
 
-        # 1. Fetch data and compute indicators
+        # 1. Fetch data and compute indicators (V2: VIX + put/call ratio)
         df = self.engineer.add_all(self.handler.fetch_ohlcv(ticker, period="2y"))
+        df = self.engineer.add_vix(df)
+        df = self.engineer.add_put_call_ratio(df)
         latest = df.iloc[-1]
 
         # Use live quote if market is open, else daily close
@@ -245,8 +247,8 @@ class CreditSpreadScreener:
             weight=1.0,
         ))
 
-        # 10. ML signal
-        predictor = SwingPredictor()
+        # 10. ML signal (Ensemble: 3-model majority vote)
+        predictor = EnsemblePredictor()
         predictor.train(df)
         label, prob = predictor.predict(df)
         ml_bullish = label == 1 and prob >= self.ML_CONVICTION_MIN

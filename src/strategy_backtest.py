@@ -78,6 +78,7 @@ class Trade:
     pnl: float
     pnl_pct: float
     won: bool
+    vix_at_entry: float = 20.0
 
 
 @dataclass
@@ -111,7 +112,7 @@ class StrategyResult:
 
     @property
     def equity_curve(self):
-        """Fixed fractional: risk 20% of equity per trade (realistic for small accounts)."""
+        """Fixed fractional: risk 20% of equity per trade."""
         alloc_frac = 0.20
         eq = [self.starting_capital]
         for t in self.trades:
@@ -119,6 +120,35 @@ class StrategyResult:
             trade_pnl = risked * t.pnl_pct
             eq.append(max(eq[-1] + trade_pnl, 0.01))
         return eq
+
+    @property
+    def adaptive_equity_curve(self):
+        """Adaptive sizing: VIX regime + loss streak adjustment."""
+        from risk_manager import AdaptiveSizer
+        sizer = AdaptiveSizer(self.starting_capital)
+        eq = [self.starting_capital]
+        for t in self.trades:
+            sizer.account_size = eq[-1]
+            risked = sizer.position_size(t.vix_at_entry)
+            trade_pnl = risked * t.pnl_pct
+            eq.append(max(eq[-1] + trade_pnl, 0.01))
+            sizer.record_result(t.won)
+        return eq
+
+    @property
+    def adaptive_final_value(self):
+        return self.adaptive_equity_curve[-1]
+
+    @property
+    def adaptive_return_pct(self):
+        return (self.adaptive_final_value / self.starting_capital - 1) * 100
+
+    @property
+    def adaptive_max_drawdown_pct(self):
+        eq = np.array(self.adaptive_equity_curve)
+        peak = np.maximum.accumulate(eq)
+        dd = (eq - peak) / peak
+        return float(dd.min()) * 100
 
     @property
     def final_value(self):
@@ -155,7 +185,7 @@ def _rolling_vol(df, window=30):
     return vol.bfill().clip(lower=0.10)
 
 
-def backtest_bull_put_spread(df, ticker="SPY", width=10, dte=14, tp_pct=0.50):
+def backtest_bull_put_spread(df, ticker="SPY", width=10, dte=14, tp_pct=0.50, vix_series=None):
     """Sell ATM put + buy put `width` pts lower, 14 DTE, take profit at 50%."""
     vol = _rolling_vol(df)
     trades = []
@@ -164,6 +194,7 @@ def backtest_bull_put_spread(df, ticker="SPY", width=10, dte=14, tp_pct=0.50):
         S = df["close"].iloc[i]
         sigma = vol.iloc[i]
         T = dte / 252
+        vix_now = float(vix_series.iloc[i]) if vix_series is not None else 20.0
 
         short_K = round(S)
         long_K = short_K - width
@@ -194,6 +225,7 @@ def backtest_bull_put_spread(df, ticker="SPY", width=10, dte=14, tp_pct=0.50):
                     pnl=current_profit,
                     pnl_pct=pnl_pct,
                     won=True,
+                    vix_at_entry=vix_now,
                 ))
                 exit_day = j
                 closed_early = True
@@ -214,6 +246,7 @@ def backtest_bull_put_spread(df, ticker="SPY", width=10, dte=14, tp_pct=0.50):
                 pnl=pnl,
                 pnl_pct=pnl_pct,
                 won=pnl > 0,
+                vix_at_entry=vix_now,
             ))
 
         i = exit_day + 1
